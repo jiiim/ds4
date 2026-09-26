@@ -42182,6 +42182,7 @@ static bool ds41_graph_short_prefill(ds41_gpu_graph *g, const ds4_model *m,
 struct ds4_vocab {
     ds4_str *token;
     int n_vocab;
+    bool qwen35_no_mark_pretokenizer;
     int bos_id;
     int eos_id;
     int system_id;
@@ -43069,6 +43070,10 @@ static qwen4_char_info qwen4_char_at(const char *s, uint64_t len, uint64_t pos) 
     return c;
 }
 
+static inline bool qwen35_letter(const ds4_vocab *vocab, qwen4_char_info c) {
+    return c.letter || (!vocab->qwen35_no_mark_pretokenizer && c.mark);
+}
+
 /* Qwen3.8 pre-tokenization (tokenizer.ggml.pre = "qwen35"), the ordered
  * alternation
  *   (?i:'s|'t|'re|'ve|'m|'ll|'d) | [^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+ | \p{N} |
@@ -43102,20 +43107,20 @@ static void bpe_tokenize_text_qwen35(const ds4_vocab *vocab, const char *text, t
             }
         }
 
-        /* an optional non-letter prefix, then a run of letters and marks */
+        /* an optional non-letter prefix, then a run of letters */
         {
             uint64_t run = UINT64_MAX;
-            if (cur.letter || cur.mark) {
+            if (qwen35_letter(vocab, cur)) {
                 run = cur.next;
             } else if (cur.cp != '\r' && cur.cp != '\n' && !cur.number) {
                 qwen4_char_info n1 = qwen4_char_at(text, len, cur.next);
-                if (n1.valid && (n1.letter || n1.mark)) run = n1.next;
+                if (n1.valid && qwen35_letter(vocab, n1)) run = n1.next;
             }
             if (run != UINT64_MAX) {
                 pos = run;
                 while (pos < len) {
                     qwen4_char_info scan = qwen4_char_at(text, len, pos);
-                    if (!scan.valid || !(scan.letter || scan.mark)) break;
+                    if (!scan.valid || !qwen35_letter(vocab, scan)) break;
                     pos = scan.next;
                 }
                 bpe_emit_piece(vocab, (ds4_str){ text + start, pos - start }, out);
@@ -43136,11 +43141,15 @@ static void bpe_tokenize_text_qwen35(const ds4_vocab *vocab, const char *text, t
                 punct_pos = cur.next;
                 punct = qwen4_char_at(text, len, punct_pos);
             }
-            if (punct.valid && !punct.space && !punct.letter && !punct.mark && !punct.number) {
+            if (punct.valid && !punct.space && !punct.letter &&
+                (vocab->qwen35_no_mark_pretokenizer || !punct.mark) &&
+                !punct.number) {
                 pos = punct_pos;
                 while (pos < len) {
                     qwen4_char_info scan = qwen4_char_at(text, len, pos);
-                    if (!scan.valid || scan.space || scan.letter || scan.mark || scan.number) break;
+                    if (!scan.valid || scan.space || scan.letter ||
+                        (!vocab->qwen35_no_mark_pretokenizer && scan.mark) ||
+                        scan.number) break;
                     pos = scan.next;
                 }
                 while (pos < len) {
@@ -43299,6 +43308,16 @@ static int vocab_lookup_optional(const ds4_vocab *vocab, const char *text) {
 
 static void vocab_load(ds4_vocab *vocab, const ds4_model *model) {
     memset(vocab, 0, sizeof(*vocab));
+
+    ds4_str pretokenizer_variant = {0};
+    if (model_get_string(model, "ds4.qwen4.tokenizer.pretokenizer",
+                         &pretokenizer_variant)) {
+        if (!ds4_model_is_qwen4() ||
+            !ds4_streq(pretokenizer_variant, "qwen35-no-mark")) {
+            ds4_die("unsupported ds4 Qwen tokenizer pre-tokenizer variant");
+        }
+        vocab->qwen35_no_mark_pretokenizer = true;
+    }
 
     ds4_array_ref tokens;
     ds4_array_ref merges;

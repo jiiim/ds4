@@ -2399,10 +2399,38 @@ def require_conversion_space(output_root: Path, staging_root: Path,
             )
 
 
+def tokenizer_pretokenizer_variant(db: SourceDB) -> str | None:
+    try:
+        config = json.loads(db.read_metadata_file(
+            "tokenizer.json", max_bytes=64 << 20
+        ))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        fail(f"cannot read source tokenizer.json: {error}")
+    pending = [config.get("pre_tokenizer")]
+    patterns: list[str] = []
+    while pending:
+        node = pending.pop()
+        if isinstance(node, dict):
+            pattern = node.get("pattern")
+            if isinstance(pattern, dict) and isinstance(pattern.get("Regex"), str):
+                patterns.append(pattern["Regex"])
+            pending.extend(node.values())
+        elif isinstance(node, list):
+            pending.extend(node)
+    if not patterns:
+        fail("source tokenizer.json has no supported Qwen pre-tokenizer regex")
+    pattern = "\n".join(patterns)
+    if r"\p{L}" not in pattern or r"\p{N}" not in pattern:
+        fail("source tokenizer.json does not use a supported Qwen pre-tokenizer")
+    # Qwen groups Unicode combining marks with letters; Swift 1.5 does not.
+    return "qwen35-no-mark" if r"\p{M}" not in pattern else None
+
+
 def create_streamed_pack(args, db: SourceDB, plan: dict[str, list[Action]],
                          quantizer: GGMLQuantizer, pack_id: str,
                          tokenizer: list[bytes], chat_template: bytes,
-                         imatrix: QwenGGUFImatrix | None = None):
+                         imatrix: QwenGGUFImatrix | None = None,
+                         pretokenizer_variant: str | None = None):
     profile = profile_from_args(args)
     if profile.name == "q2" and imatrix is None:
         fail("Q2 pack conversion requires a validated GGUF imatrix")
@@ -2432,6 +2460,11 @@ def create_streamed_pack(args, db: SourceDB, plan: dict[str, list[Action]],
             records.append(
                 kv_string("tokenizer.chat_template", chat_template)
             )
+            if pretokenizer_variant is not None:
+                records.append(kv_string(
+                    "ds4.qwen4.tokenizer.pretokenizer",
+                    pretokenizer_variant,
+                ))
         else:
             records = common_metadata(
                 pack_id, args.source_revision, key, profile
@@ -3183,9 +3216,11 @@ def main(argv=None):
         chat_template = SOURCE.read_metadata_file("chat_template.jinja")
         if not chat_template.strip():
             fail("official chat template is empty")
+        pretokenizer_variant = tokenizer_pretokenizer_variant(SOURCE)
         create_streamed_pack(
             args, SOURCE, plan, quantizer, pack_id, tokenizer,
             chat_template, imatrix,
+            pretokenizer_variant=pretokenizer_variant,
         )
         return 0
     finally:

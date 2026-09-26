@@ -670,7 +670,7 @@ def build_kv(base: Reader, ple: Reader, mtp=None):
     add("qwen4exp.ple.head_vocab_sizes", 9, Arr(10, list(vocab)))
 
     for k, v in pk.items():
-        if k.startswith("tokenizer."):
+        if k.startswith("tokenizer.") or k == "ds4.qwen4.tokenizer.pretokenizer":
             add(k, base.kv_types[k], v)
     return out
 
